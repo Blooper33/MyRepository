@@ -1,0 +1,169 @@
+import pandas as pd  # Used for data manipulation
+# Method that reads the column headers from the Excel sheet
+
+def read_columns(file_path, sheet_name):
+    # Read the Excel file into a pandas DataFrame
+    df = pd.read_excel(file_path, sheet_name=sheet_name)
+    # Extract column names excluding the first column (assuming it's not part of the data)
+    columns = df.columns[1:].tolist()
+    return columns
+
+
+# Method that reads the row headers (excluding the first row) from the Excel sheet
+
+def read_rows(file_path, sheet_name):
+    # Read the Excel file into a pandas DataFrame without header (assuming first row is not header)
+    df = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
+    # Extract row values starting from the second row (assuming first row is header)
+    rows = df.iloc[1:, 0].tolist()
+    return rows
+
+
+# Method that reads data from a single line (row) in the Excel sheet
+
+def read_one_line(file_path, sheet_name):
+    # Read the Excel file into a pandas DataFrame
+    df = pd.read_excel(file_path, sheet_name=sheet_name)
+    data_dict = {}
+    # Iterate over each row in the DataFrame
+    for index, row in df.iterrows():
+        header = row.iloc[0]  # Extract the header (first cell in the row)
+        if header not in data_dict:
+            data_dict[header] = None  # Initialize an empty list for each header
+        # Iterate over the values in the row, excluding the first column (header)
+        data_dict[header] = row.iloc[-1]
+    return data_dict
+
+
+# Method that reads data from a table structure in the Excel sheet
+
+def read_table(file_path, sheet_name):
+    # Read the Excel file into a pandas DataFrame, setting the first column as index
+    df = pd.read_excel(file_path, index_col=0, sheet_name=sheet_name)
+    data_dict = {}
+    # Iterate over each row and column in the DataFrame
+    for row_index, row in df.iterrows():
+        for column_index, value in row.items():
+            key = (row_index, column_index)  # Create a key using row and column index
+            data_dict[key] = value  # Assign the value to the key
+    return data_dict
+
+    #Import of data
+
+path = "C:/Users/jahnf/Desktop/RDG/Optimierungsmodell/"
+
+clusters = read_rows(path + "Input.xlsx", "Kosten_Wachen")
+cost_station = read_one_line(path + "Input.xlsx", "Kosten_Wachen")
+adjacency1 = read_table(path + "Input.xlsx", "Adjazenz Kat1")
+demand1 = read_one_line(path + "Input.xlsx", "Nachfrage Kat1")
+adjacency2 = read_table(path + "Input.xlsx", "Adjazenz Kat2")
+demand2 = read_one_line(path + "Input.xlsx", "Nachfrage Kat2")
+adjacency3 = read_table(path + "Input.xlsx", "Adjazenz Kat3")
+demand3 = read_one_line(path + "Input.xlsx", "Nachfrage Kat3")
+
+#Constant factors
+cost_vehicle = 100000
+service_level1 = 0.95
+service_level2 = 0.80
+service_level3 = 0.80
+max_vehicles_station = 50
+yearly_deployment_vehicle = 1000 #Estimation
+mean_deployment_duration = 0.75 #in hours
+
+from pyomo.environ import*
+
+#creation of a new concrete model in pyomo
+model = ConcreteModel()
+
+# Initialization of sets / indexes
+model.NODEI = Set(initialize = clusters) # Index i
+model.NODEJ = Set(initialize = clusters) # Index j
+
+# Initialization of decision variable for allocation
+model.STATIONOPEN = Var(model.NODEJ, within = Binary) #xj
+model.VEHICLES = Var(model.NODEJ, within = NonNegativeIntegers) #zj
+
+#initialization of the parameters
+model.COSTSTATION = Param(model.NODEJ, initialize = cost_station) #fj
+model.ADJACENCY1 = Param(model.NODEI, model.NODEJ, initialize = adjacency1) #aij
+model.DEMAND1 = Param(model.NODEI, initialize = demand1)
+model.ADJACENCY2 = Param(model.NODEI, model.NODEJ, initialize = adjacency2) #aij
+model.DEMAND2 = Param(model.NODEI, initialize = demand2)
+model.ADJACENCY3 = Param(model.NODEI, model.NODEJ, initialize = adjacency3) #aij
+model.DEMAND3 = Param(model.NODEI, initialize = demand3)
+
+import math
+
+#Definition of objective function
+def objective_rule(model):
+    costs_stations = sum(model.STATIONOPEN[nodej] * model.COSTSTATION[nodej] for nodej in model.NODEJ)
+    costs_vehicles = sum(model.VEHICLES[nodej] for nodej in model.NODEJ) * cost_vehicle
+    
+    return costs_stations + costs_vehicles
+
+model.objective = Objective(rule = objective_rule, sense = minimize) 
+
+#Constraints
+
+def vehiclesOnlyAtOpenPlants(model, nodej):
+    return model.VEHICLES[nodej] <= model.STATIONOPEN[nodej] * max_vehicles_station
+
+def nodeCovered1(model, nodei):
+    return 1 - sum(model.ADJACENCY1[nodei,nodej] * model.STATIONOPEN[nodej] for nodej in model.NODEJ) <= 0
+
+def nodeCovered2(model, nodei):
+    return 1 - sum(model.ADJACENCY2[nodei,nodej] * model.STATIONOPEN[nodej] for nodej in model.NODEJ) <= 0
+
+def nodeCovered3(model, nodei):
+    return 1 - sum(model.ADJACENCY3[nodei,nodej] * model.STATIONOPEN[nodej] for nodej in model.NODEJ) <= 0
+
+def demandFulfilled1(model, nodei):
+    return (service_level1 * model.DEMAND1[nodei] <=  (1 - (mean_deployment_duration * model.DEMAND1[nodei]) / 
+            (17568 * sum(model.ADJACENCY1[nodei,nodej] * model.STATIONOPEN[nodej] for nodej in model.NODEJ))) ** 
+            (sum(model.ADJACENCY1[nodei,nodej] * model.STATIONOPEN[nodej] for nodej in model.NODEJ)) *
+            sum(model.ADJACENCY1[nodei, nodej] * model.VEHICLES[nodej] for nodej in model.NODEJ))
+
+def demandFulfilled2(model, nodei):
+    return (service_level2 * model.DEMAND2[nodei] <=  (1 - (mean_deployment_duration * model.DEMAND2[nodei]) / 
+            (17568 * sum(model.ADJACENCY2[nodei,nodej] * model.STATIONOPEN[nodej] for nodej in model.NODEJ))) ** 
+            (sum(model.ADJACENCY2[nodei,nodej] * model.STATIONOPEN[nodej] for nodej in model.NODEJ)) *
+            sum(model.ADJACENCY2[nodei, nodej] * model.VEHICLES[nodej] for nodej in model.NODEJ))
+
+def demandFulfilled3(model, nodei):
+    return (service_level3 * model.DEMAND3[nodei] <=  (1 - (mean_deployment_duration * model.DEMAND3[nodei]) / 
+            (17568 * sum(model.ADJACENCY3[nodei,nodej] * model.STATIONOPEN[nodej] for nodej in model.NODEJ))) ** 
+            (sum(model.ADJACENCY3[nodei,nodej] * model.STATIONOPEN[nodej] for nodej in model.NODEJ)) *
+            sum(model.ADJACENCY3[nodei, nodej] * model.VEHICLES[nodej] for nodej in model.NODEJ))
+
+model.vehiclesOnlyAtOpenPlants_constraint = Constraint(model.NODEJ, rule = vehiclesOnlyAtOpenPlants)
+model.nodeCovered_constraint1 = Constraint(model.NODEI, rule = nodeCovered1)
+model.nodeCovered_constraint2 = Constraint(model.NODEI, rule = nodeCovered2)
+model.nodeCovered_constraint3 = Constraint(model.NODEI, rule = nodeCovered3)
+model.demandFulfilled_constraint1 = Constraint(model.NODEI, rule = demandFulfilled1)
+model.demandFulfilled_constraint2 = Constraint(model.NODEI, rule = demandFulfilled2)
+model.demandFulfilled_constraint3 = Constraint(model.NODEI, rule = demandFulfilled3)
+
+import xlsxwriter as xlsx
+
+#Determination of a solver that should be used 
+optimizer = SolverFactory('mindtpy')
+
+#Performing the optimization 
+results = optimizer.solve(model, mip_solver='gurobi', nlp_solver='ipopt')
+
+#Export output data
+workbook = xlsx.Workbook(path + 'Output_Optimierung_v3.xlsx')
+worksheet1 = workbook.add_worksheet()
+
+worksheet1.write(0, 0, "cluster")
+worksheet1.write(0, 1, "is station")
+worksheet1.write(0, 2, "number vehicles")
+
+i = 1
+for cluster in model.NODEJ:
+    worksheet1.write(i, 0, cluster)
+    worksheet1.write(i, 1, model.STATIONOPEN[cluster].value)
+    worksheet1.write(i, 2, model.VEHICLES[cluster].value)
+    i += 1
+
+workbook.close()
